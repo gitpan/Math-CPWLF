@@ -21,11 +21,11 @@ Math::CPWLF - interpolation using nested continuous piece-wise linear functions
 
 =head1 VERSION
 
-Version 0.11
+Version 0.12
 
 =cut
 
-our $VERSION = '0.11';
+our $VERSION = '0.12';
 
 =head1 SYNOPSIS
 
@@ -67,7 +67,8 @@ C<Math::CPWLF> objects, much like perl hashes.
 
 =head2 new
 
-Construct a new C<Math::CPWLF> function with no knots.
+Construct a new C<Math::CPWLF> function with no knots, and the default out of
+bounds behavior.
 
    my $func = Math::CPWLF->new;
    
@@ -93,6 +94,11 @@ not explicitly constructed with their own C<oob> methods.
 =item * C<undef> - Return undef.
 
 =back
+
+Construct an instance that returns C<undef> or empty list when the requested x
+is out of bounds:
+
+   my $func = Math::CPWLF->new( oob => 'undef' );
 
 =back
 
@@ -372,15 +378,31 @@ sub _neighbors
    if ( ! exists $self->{'_keys'} )
       {
       $self->_order_keys;
+      $self->_index_keys;
       }
      
    if ( ! @{ $self->{'_keys'} } )
       {
       die "Error: cannot interpolate with no knots";
       }
-     
-   my ( $x_dn_i, $x_up_i, $exceptions ) =
-      _find_neighbors( $self->{'_keys'}, $key );
+
+   my ( $x_dn_i, $x_up_i, $exceptions );
+      
+   if ( exists $self->{'_index'}{$key} )
+      {
+      $x_dn_i     = $self->{'_index'}{$key};
+      $x_up_i     = $x_dn_i;
+      $exceptions = {};
+      }
+   else
+      {
+      ( $x_dn_i, $x_up_i, $exceptions ) = do
+         {
+         my $min = 0;
+         my $max = $#{ $self->{'_keys'} };
+         _find_neighbors( $self->{'_keys'}, $key, $min, $max );
+         };
+      }
    
    if ( $exceptions->{oob} )
       {
@@ -443,16 +465,6 @@ sub _find_neighbors
    {
    my ( $array, $value, $min_index, $max_index ) = @_;
    
-   if ( ! defined $min_index )
-      {
-      $min_index = 0;
-      }
-
-   if ( ! defined $max_index )
-      {
-      $max_index = $#{ $array };
-      }
-      
    my $array_size = $max_index - $min_index + 1;
 
    ## empty arrays return all undefs
@@ -460,12 +472,6 @@ sub _find_neighbors
       {
       return( undef, undef, {} );
       }
-
-#   ## single knot functions  
-#   if ( $array_size == 1 )
-#      {
-#      return( 0, 0, {} );
-#      }
 
    ## direct hit on min
    if ( $value == $array->[$min_index] )
@@ -513,12 +519,14 @@ sub _find_neighbors
    ## value is inside the lower half      
    if ( $value < $array->[$top_min] )
       {
-      @_ = ( $array, $value, $bottom_min, $bottom_max );
+      $_[2] = $bottom_min;
+      $_[3] = $bottom_max;
       }
    ## value is inside the upper half
    else
       {
-      @_ = ( $array, $value, $top_min, $top_max );
+      $_[2] = $top_min;
+      $_[3] = $top_max;
       }
 
    goto &_find_neighbors;
@@ -531,7 +539,18 @@ sub _order_keys
    my @ordered_keys = sort { $a <=> $b } keys %{ $self->{'_data'} };
    
    $self->{'_keys'} = \@ordered_keys;
-   }  
+   }
+   
+sub _index_keys
+   {
+   my ( $self ) = @_;
+
+   delete $self->{'_index'};
+   for my $i ( 0 .. $#{ $self->{'_keys'} } )
+      {
+      $self->{'_index'}{ $self->{'_keys'}[$i] } = $i;
+      }
+   }
 
 =head1 AUTHOR
 
