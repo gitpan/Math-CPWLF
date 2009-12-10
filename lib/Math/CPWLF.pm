@@ -12,7 +12,7 @@ use overload
    '&{}'    => sub
       {
       my $self = $_[0];
-      return _interp_closure( [ [ $self ] ], $self->{_opts} )
+      return _top_interp_closure( $self, $self->{_opts} )
       };
       
 =head1 NAME
@@ -21,11 +21,11 @@ Math::CPWLF - interpolation using nested continuous piece-wise linear functions
 
 =head1 VERSION
 
-Version 0.12
+Version 0.13
 
 =cut
 
-our $VERSION = '0.12';
+our $VERSION = '0.13';
 
 =head1 SYNOPSIS
 
@@ -136,6 +136,7 @@ sub knot
   {
   my $self = shift @_;
   
+  ## caller intends to use hash-like multi-dimensional syntax
   ## $f->knot->(1)(2)( 3 => 4 );
   if ( @_ == 0 )
      {
@@ -144,6 +145,7 @@ sub knot
         $self->knot( @_ );
         };
      }
+  ## caller is in the middle of using hash-like multi-dimensional syntax
   elsif ( @_ == 1 )
      {
      my $key = shift;
@@ -158,12 +160,15 @@ sub knot
         $self->{'_data'}{$key}->knot( @_ );
         };
      }
+  ## args are an x,y pair
   elsif ( @_ == 2 )
      {
      my ( $key, $val ) = @_;
      $key += 0;
      $self->{'_data'}{$key} = $val;
      }
+  ## caller is using bulk multi-dimensional syntax
+  ## $f->knot( 1, 2, 3 => 4 );
   elsif ( @_ > 2 )
      {
      my $key = shift;
@@ -184,9 +189,42 @@ sub knot
   return $self;
   }
   
-sub _interp_closure
+sub _top_interp_closure
    {
-   my ( $stack, $opts ) = @_;
+   my ( $func, $opts ) = @_;
+   
+   my $interp = sub
+      {
+      my ( $x_given ) = @_;
+
+      $x_given += 0;
+
+      my ($x_dn, $x_up, $y_dn, $y_up) =
+         $func->_neighbors($x_given, $opts);
+      
+      return _nada() if ! defined $x_dn;
+
+      my $node =
+         {
+         x_given => $x_given,
+         x_dn    => $x_dn,
+         y_dn    => $y_dn,
+         x_up    => $x_up,
+         y_up    => $y_up,
+         };
+
+      my @slice = ( $node );
+      my @tree  = ( \@slice );
+
+      return ref $y_dn || ref $y_up ? _nested_interp_closure( \@tree, $opts )
+                                    : _reduce_tree( \@tree )
+      };
+   
+   }
+  
+sub _nested_interp_closure
+   {
+   my ( $tree, $opts ) = @_;
    
    my $interp = sub
       {
@@ -194,154 +232,80 @@ sub _interp_closure
       
       $x_given += 0;
       
-      my @results;
+      my @slice;
       my $make_closure;
       
-      for my $value ( @{ $stack->[-1] } )
+      for my $node ( @{ $tree->[-1] } )
          {
             
-         if ( ref $value eq 'HASH' )
+         for my $y_pos ( 'y_dn', 'y_up' )
             {
-               
-            if ( ref $value->{y_dn} )
-               {
-               my ($x_dn, $x_up, $y_dn, $y_up) = $value->{y_dn}->_neighbors($x_given, $opts);
-               
-               if ( ! defined $x_dn )
-                  {
-                  return _nada();
-                  }
             
-               if ( ref $y_dn || ref $y_up )
-                  {
-                  $make_closure = 1;
-                  }
-                  
-               push @results,
-                  {
-                  x_given => $x_given,
-                  x_dn    => $x_dn,
-                  y_dn    => $y_dn,
-                  x_up    => $x_up,
-                  y_up    => $y_up,
-                  into    => [ $value, 'y_dn' ],
-                  };
-               }
-
-            if ( ref $value->{y_up} )
-               {
-               my ($x_dn, $x_up, $y_dn, $y_up) = $value->{y_up}->_neighbors($x_given, $opts);
+            next if ! ref $node->{$y_pos};
+            
+            my ($x_dn, $x_up, $y_dn, $y_up) =
+               $node->{$y_pos}->_neighbors($x_given, $opts);
+            
+            return _nada() if ! defined $x_dn;
+         
+            $make_closure = ref $y_dn || ref $y_up;
                
-               if ( ! defined $x_dn )
-                  {
-                  return _nada();
-                  }
-            
-               if ( ref $y_dn || ref $y_up )
-                  {
-                  $make_closure = 1;
-                  }
-
-               push @results,
-                  {
-                  x_given => $x_given,
-                  x_dn    => $x_dn,
-                  y_dn    => $y_dn,
-                  x_up    => $x_up,
-                  y_up    => $y_up,
-                  into    => [ $value, 'y_up' ],
-                  };
-               }
-
-            }
-         else
-            {
-               
-            pop @{ $stack };
-
-            my ($x_dn, $x_up, $y_dn, $y_up) = $value->_neighbors($x_given, $opts);
-            
-            if ( ! defined $x_dn )
-               {
-               return _nada();
-               }
-            
-            push @results,
+            push @slice,
                {
                x_given => $x_given,
                x_dn    => $x_dn,
                y_dn    => $y_dn,
                x_up    => $x_up,
                y_up    => $y_up,
+               into    => \$node->{$y_pos},
                };
 
-            if ( ref $y_dn || ref $y_up )
-               {
-               $make_closure = 1;
-               }
-
             }
 
          }
          
-      push @{ $stack }, \@results;
+      push @{ $tree }, \@slice;
       
-      if ( $make_closure )
-         {
-         
-         return _interp_closure( $stack, $opts );
-         
-         }
-      else
-         {
-            
-         ## unwind stacks and solve from the leaves to the trunk
-         
-         my $return;
-         
-         for my $slice ( reverse @{ $stack } )
-            {
-               
-            for my $node ( @{ $slice } )
-               {
-
-               my @line = grep defined, @{ $node }{ qw/ x_dn x_up y_dn y_up / };
-               
-               return if @line != 4;
-               
-               my $y_given = _mx_plus_b( $node->{'x_given'}, @line );
-               
-               $return = $y_given;
-               
-               if ( $node->{'into'} )
-                  {
-                  my $parent_node = $node->{'into'}[0];
-                  my $neighbor    = $node->{'into'}[1];
-                  $parent_node->{ $neighbor } = $y_given;
-                  }
-
-               }
-
-            }
-            
-         return $return;
-         }
-         
+      return $make_closure ? _nested_interp_closure( $tree, $opts )
+                           : _reduce_tree( $tree )
+      
       };
 
    return $interp;   
    }
-   
+
+## converts the final tree of curried line segments and x values to the final
+## y value
+sub _reduce_tree
+   {
+   my ($tree) = @_;
+
+   for my $slice ( reverse @{ $tree } )
+      {
+         
+      for my $node ( @{ $slice } )
+         {
+
+         my @line = grep defined, @{ $node }{ qw/ x_dn x_up y_dn y_up / };
+         
+         my $y_given = _mx_plus_b( $node->{'x_given'}, @line );
+         
+         return $y_given if ! $node->{'into'};
+
+         ${ $node->{'into'} } = $y_given;
+
+         }
+
+      }
+      
+   }
+
+## used to handle 'undef' oob exceptions
+##   - returns a reference to itself in CODEREF context
+##   - else returns undef   
 sub _nada
    {
-   if ( want('CODE') )
-      {
-      return \&_nada;
-      }
-   else
-      {
-      return;
-      }
+   return want('CODE') ? \&_nada : ();
    }   
    
 {
@@ -350,7 +314,11 @@ my $default_opts =
    {
    oob => 'die',
    };   
-   
+
+## - merges the options, priority from high to low is:
+##    - object
+##    - inherited
+##    - defaults
 sub _merge_opts
    {
    my ($self, $inherited_opts) = @_;
@@ -371,6 +339,10 @@ sub _merge_opts
    
 }
 
+## - locate the neighboring x and y pairs to the given x values
+## - handles oob exceptions
+## - handles direct hits
+## - handles empty functions
 sub _neighbors
    {
    my ($self, $key, $opts) = @_;
@@ -386,25 +358,36 @@ sub _neighbors
       die "Error: cannot interpolate with no knots";
       }
 
-   my ( $x_dn_i, $x_up_i, $exceptions );
+   my ( $x_dn_i, $x_up_i, $oob );
       
    if ( exists $self->{'_index'}{$key} )
       {
       $x_dn_i     = $self->{'_index'}{$key};
       $x_up_i     = $x_dn_i;
-      $exceptions = {};
+      }
+   elsif ( $key < $self->{'_keys'}[0] )
+      {
+      $x_dn_i = 0;
+      $x_up_i = 0;
+      $oob    = 1;
+      }
+   elsif ( $key > $self->{'_keys'}[-1] )
+      {
+      $x_dn_i = -1;
+      $x_up_i = -1;
+      $oob    = 1;
       }
    else
       {
-      ( $x_dn_i, $x_up_i, $exceptions ) = do
+      ( $x_dn_i, $x_up_i ) = do
          {
          my $min = 0;
          my $max = $#{ $self->{'_keys'} };
-         _find_neighbors( $self->{'_keys'}, $key, $min, $max );
+         _binary_search( $self->{'_keys'}, $key, $min, $max );
          };
       }
    
-   if ( $exceptions->{oob} )
+   if ( $oob )
       {
       my $merge_opts = $self->_merge_opts( $opts );
       if ( $merge_opts->{oob} eq 'die' )
@@ -445,6 +428,8 @@ sub _neighbors
    return $x_dn, $x_up, $y_dn, $y_up;
    }
 
+## converts a given x value and two points that define a line
+## to the corresponding y value
 sub _mx_plus_b
   {
   my ( $x, $x_dn, $x_up, $y_dn, $y_up ) = @_;
@@ -460,78 +445,50 @@ sub _mx_plus_b
 
   return $y;
   }
-  
-sub _find_neighbors
+
+## vanilla binary search algorithm used to locate a given x value
+## that is within the defined range of the function  
+sub _binary_search
    {
    my ( $array, $value, $min_index, $max_index ) = @_;
    
    my $array_size = $max_index - $min_index + 1;
-
-   ## empty arrays return all undefs
-   if ( $array_size < 1 )
-      {
-      return( undef, undef, {} );
-      }
-
-   ## direct hit on min
-   if ( $value == $array->[$min_index] )
-      {
-      return( $min_index, $min_index, {} );
-      }
-
-   ## direct hit on max
-   if ( $value == $array->[$max_index] )
-      {
-      return( $max_index, $max_index, {} );
-      }
-
-   ## left-wise out of bounds      
-   if ( $value < $array->[$min_index] )
-      {
-      return( $min_index, $min_index, { oob => 'left' } );
-      }
-
-   ## right-wise out of bounds      
-   if ( $value > $array->[$max_index] )
-      {
-      return( $max_index, $max_index, { oob => 'right' } );
-      }
    
-   ## no direct hits and not out of bounds, so must
-   ## be between min and max
-   if ( $array_size == 2 )
+   if ( $array_size > 2 )
       {
-      return( $min_index, $max_index, {} );
-      }
-   
-   ##                                                        size:  3 20
-   my $bottom_min = $min_index;                                  #  0  0
-   my $bottom_max = $min_index + int( ( $array_size - 1 ) / 2 ); #  1  9
-   my $top_min    = $bottom_max + 1;                             #  2 10
-   my $top_max    = $max_index;                                  #  2 19
 
-   ## value is between the split point   
-   if ( $value > $array->[$bottom_max] && $value < $array->[$top_min] )
-      {
-      return( $bottom_max, $top_min, {} );
-      }
+      ##                                                        size:  3 20
+      my $mid_index  = $min_index + int( ( $array_size - 1 ) / 2 ); #  1  9
+      
+      ## value is inside the lower half      
+      if ( $value <= $array->[$mid_index] )
+         {
+         $_[3] = $mid_index;
+         }
+      ## value is inside the upper half
+      else
+         {
+         $_[2] = $mid_index;
+         }
 
-   ## value is inside the lower half      
-   if ( $value < $array->[$top_min] )
-      {
-      $_[2] = $bottom_min;
-      $_[3] = $bottom_max;
+      goto &_binary_search;
+
       }
-   ## value is inside the upper half
+   elsif ( $array_size > 0 )
+      {
+
+      return( $min_index, $max_index );
+
+      }
    else
       {
-      $_[2] = $top_min;
-      $_[3] = $top_max;
+      return( undef, undef );
       }
 
-   goto &_find_neighbors;
    }
    
+## - called on the first lookup after a knot has been set   
+## - caches an array of ordered x values
 sub _order_keys
    {
    my ( $self ) = @_;
@@ -540,7 +497,9 @@ sub _order_keys
    
    $self->{'_keys'} = \@ordered_keys;
    }
-   
+
+## - called on the first lookup after a knot has been set   
+## - creates an index mapping knot x values to their ordered indexes
 sub _index_keys
    {
    my ( $self ) = @_;
