@@ -21,11 +21,11 @@ Math::CPWLF - interpolation using nested continuous piece-wise linear functions
 
 =head1 VERSION
 
-Version 0.13
+Version 0.14
 
 =cut
 
-our $VERSION = '0.13';
+our $VERSION = '0.14';
 
 =head1 SYNOPSIS
 
@@ -78,10 +78,10 @@ Optional parameters:
 
 =item * oob
 
-Controls how a function behaves when a given x value is out of bounds of the
-current minimum and maximum knots. If a function defines an C<oob> method in
-its constructor, that method is also used for any nested functions that were
-not explicitly constructed with their own C<oob> methods.
+The C<oob> parameter controls how a function behaves when a given x value is out
+of bounds of the current minimum and maximum knots. If a function defines an
+C<oob> method in its constructor, that method is also used for any nested
+functions that were not explicitly constructed with their own C<oob> methods.
 
 =over 4
 
@@ -136,6 +136,8 @@ sub knot
   {
   my $self = shift @_;
   
+  delete $self->{_x_vals_order};
+
   ## caller intends to use hash-like multi-dimensional syntax
   ## $f->knot->(1)(2)( 3 => 4 );
   if ( @_ == 0 )
@@ -148,47 +150,48 @@ sub knot
   ## caller is in the middle of using hash-like multi-dimensional syntax
   elsif ( @_ == 1 )
      {
-     my $key = shift;
+     my $x = shift;
 
-     if ( ! defined $self->{'_data'}{$key} || ! ref $self->{'_data'}{$key} )
+     if ( ! defined $self->{_data}{$x} ||
+          ! ref $self->{_data}{$x} )
         {
-        $self->{'_data'}{$key} = ( ref $self )->new;
+        $self->{_data}{$x} = ( ref $self )->new;
         }
 
      return sub
         {
-        $self->{'_data'}{$key}->knot( @_ );
+        $self->{_data}{$x}->knot( @_ );
         };
      }
   ## args are an x,y pair
   elsif ( @_ == 2 )
      {
-     my ( $key, $val ) = @_;
-     $key += 0;
-     $self->{'_data'}{$key} = $val;
+     my ( $x, $y ) = @_;
+     $x += 0;
+     $self->{_data}{$x} = $y;
      }
   ## caller is using bulk multi-dimensional syntax
   ## $f->knot( 1, 2, 3 => 4 );
   elsif ( @_ > 2 )
      {
-     my $key = shift;
+     my $x = shift;
      
-     $key += 0;
+     $x += 0;
      
-     if ( ! defined $self->{'_data'}{$key} || ! ref $self->{'_data'}{$key} )
+     if ( ! defined $self->{_data}{$x} || ! ref $self->{_data}{$x} )
         {
-        $self->{'_data'}{$key} = ( ref $self )->new;
+        $self->{_data}{$x} = ( ref $self )->new;
         }
         
-     $self->{'_data'}{$key}->knot(@_)
+     $self->{_data}{$x}->knot(@_);
      
      }
 
-  delete $self->{'_keys'};
-
   return $self;
   }
-  
+
+## - solves the first dimension lookup, or
+## - returns first dimension closure as needed  
 sub _top_interp_closure
    {
    my ( $func, $opts ) = @_;
@@ -199,29 +202,22 @@ sub _top_interp_closure
 
       $x_given += 0;
 
-      my ($x_dn, $x_up, $y_dn, $y_up) =
-         $func->_neighbors($x_given, $opts);
+      my $node = $func->_make_node($x_given, $opts);
       
-      return _nada() if ! defined $x_dn;
-
-      my $node =
-         {
-         x_given => $x_given,
-         x_dn    => $x_dn,
-         y_dn    => $y_dn,
-         x_up    => $x_up,
-         y_up    => $y_up,
-         };
+      return _nada() if ! defined $node;
 
       my @slice = ( $node );
       my @tree  = ( \@slice );
 
-      return ref $y_dn || ref $y_up ? _nested_interp_closure( \@tree, $opts )
-                                    : _reduce_tree( \@tree )
+      return ref $node->{y_dn} || ref $node->{y_up}
+           ? _nested_interp_closure( \@tree, $opts )
+           : _reduce_tree( \@tree )
       };
    
    }
-  
+
+## - solves the 2+ dimension lookups, or
+## - returns 2+ dimension closures as needed
 sub _nested_interp_closure
    {
    my ( $tree, $opts ) = @_;
@@ -243,22 +239,15 @@ sub _nested_interp_closure
             
             next if ! ref $node->{$y_pos};
             
-            my ($x_dn, $x_up, $y_dn, $y_up) =
-               $node->{$y_pos}->_neighbors($x_given, $opts);
+            my $new_node = $node->{$y_pos}->_make_node($x_given, $opts);
             
-            return _nada() if ! defined $x_dn;
+            return _nada() if ! defined $new_node;
          
-            $make_closure = ref $y_dn || ref $y_up;
+            $make_closure = ref $new_node->{y_dn} || ref $new_node->{y_up};
+            
+            $new_node->{into} = \$node->{$y_pos};
                
-            push @slice,
-               {
-               x_given => $x_given,
-               x_dn    => $x_dn,
-               y_dn    => $y_dn,
-               x_up    => $x_up,
-               y_up    => $y_up,
-               into    => \$node->{$y_pos},
-               };
+            push @slice, $new_node;
 
             }
 
@@ -288,11 +277,11 @@ sub _reduce_tree
 
          my @line = grep defined, @{ $node }{ qw/ x_dn x_up y_dn y_up / };
          
-         my $y_given = _mx_plus_b( $node->{'x_given'}, @line );
+         my $y_given = _mx_plus_b( $node->{x_given}, @line );
          
-         return $y_given if ! $node->{'into'};
+         return $y_given if ! $node->{into};
 
-         ${ $node->{'into'} } = $y_given;
+         ${ $node->{into} } = $y_given;
 
          }
 
@@ -343,35 +332,35 @@ sub _merge_opts
 ## - handles oob exceptions
 ## - handles direct hits
 ## - handles empty functions
-sub _neighbors
+sub _make_node
    {
-   my ($self, $key, $opts) = @_;
+   my ($self, $x, $opts) = @_;
   
-   if ( ! exists $self->{'_keys'} )
+   if ( ! exists $self->{_x_vals_order} )
       {
-      $self->_order_keys;
-      $self->_index_keys;
+      $self->_order_x_vals;
+      $self->_index_x_vals;
       }
      
-   if ( ! @{ $self->{'_keys'} } )
+   if ( ! @{ $self->{_x_vals_order} } )
       {
       die "Error: cannot interpolate with no knots";
       }
 
    my ( $x_dn_i, $x_up_i, $oob );
       
-   if ( exists $self->{'_index'}{$key} )
+   if ( exists $self->{_x_vals_index}{$x} )
       {
-      $x_dn_i     = $self->{'_index'}{$key};
+      $x_dn_i     = $self->{_x_vals_index}{$x};
       $x_up_i     = $x_dn_i;
       }
-   elsif ( $key < $self->{'_keys'}[0] )
+   elsif ( $x < $self->{_x_vals_order}[0] )
       {
       $x_dn_i = 0;
       $x_up_i = 0;
       $oob    = 1;
       }
-   elsif ( $key > $self->{'_keys'}[-1] )
+   elsif ( $x > $self->{_x_vals_order}[-1] )
       {
       $x_dn_i = -1;
       $x_up_i = -1;
@@ -382,8 +371,8 @@ sub _neighbors
       ( $x_dn_i, $x_up_i ) = do
          {
          my $min = 0;
-         my $max = $#{ $self->{'_keys'} };
-         _binary_search( $self->{'_keys'}, $key, $min, $max );
+         my $max = $#{ $self->{_x_vals_order} };
+         _binary_search( $self->{_x_vals_order}, $x, $min, $max );
          };
       }
    
@@ -392,16 +381,16 @@ sub _neighbors
       my $merge_opts = $self->_merge_opts( $opts );
       if ( $merge_opts->{oob} eq 'die' )
          {
-         Carp::confess "Error: given X ($key) was out of bounds of"
+         Carp::confess "Error: given X ($x) was out of bounds of"
             . " function min or max";
          }
       elsif ( $merge_opts->{oob} eq 'extrapolate' )
          {
-         if ( $key < $self->{_keys}[0] )
+         if ( $x < $self->{_x_vals_order}[0] )
             {
-            $x_up_i = List::Util::min( $#{ $self->{_keys} }, $x_up_i + 1 );
+            $x_up_i = List::Util::min( $#{ $self->{_x_vals_order} }, $x_up_i + 1 );
             }
-         elsif ( $key > $self->{_keys}[-1] )
+         elsif ( $x > $self->{_x_vals_order}[-1] )
             {
             $x_dn_i = List::Util::max( 0, $x_dn_i - 1 );
             }
@@ -419,13 +408,20 @@ sub _neighbors
          }
       }
 
-   my $x_dn = $self->{'_keys'}[ $x_dn_i ];
-   my $x_up = $self->{'_keys'}[ $x_up_i ];
+   my $x_dn = $self->{_x_vals_order}[ $x_dn_i ];
+   my $x_up = $self->{_x_vals_order}[ $x_up_i ];
 
-   my $y_dn = $self->{'_data'}{$x_dn};
-   my $y_up = $self->{'_data'}{$x_up};
+   my $y_dn = $self->{_data}{$x_dn};
+   my $y_up = $self->{_data}{$x_up};
    
-   return $x_dn, $x_up, $y_dn, $y_up;
+   return
+      {
+      x_given => $x,
+      x_dn    => $x_dn,
+      x_up    => $x_up,
+      y_dn    => $y_dn,
+      y_up    => $y_up,
+      };
    }
 
 ## converts a given x value and two points that define a line
@@ -454,60 +450,54 @@ sub _binary_search
    
    my $array_size = $max_index - $min_index + 1;
    
-   if ( $array_size > 2 )
+   while ( $array_size > 2 )
       {
 
-      ##                                                        size:  3 20
-      my $mid_index  = $min_index + int( ( $array_size - 1 ) / 2 ); #  1  9
+      ##                                                        size:  3 4 5 20
+      my $mid_index  = $min_index + int( ( $array_size - 1 ) / 2 ); #  1 2   9
       
-      ## value is inside the lower half      
+      ## value is inside the lower half
       if ( $value <= $array->[$mid_index] )
          {
-         $_[3] = $mid_index;
+         $max_index = $mid_index;
          }
       ## value is inside the upper half
       else
          {
-         $_[2] = $mid_index;
+         $min_index = $mid_index;
          }
 
-      goto &_binary_search;
+      $array_size = $max_index - $min_index + 1;
 
       }
-   elsif ( $array_size > 0 )
-      {
 
-      return( $min_index, $max_index );
-
-      }
-   else
-      {
-      return( undef, undef );
-      }
+   return $array_size > 0
+        ? ( $min_index, $max_index )
+        : ( undef, undef );
 
    }
    
 ## - called on the first lookup after a knot has been set   
 ## - caches an array of ordered x values
-sub _order_keys
+sub _order_x_vals
    {
    my ( $self ) = @_;
    
-   my @ordered_keys = sort { $a <=> $b } keys %{ $self->{'_data'} };
+   my @ordered_x_vals = sort { $a <=> $b } keys %{ $self->{_data} };
    
-   $self->{'_keys'} = \@ordered_keys;
+   $self->{_x_vals_order} = \@ordered_x_vals;
    }
 
 ## - called on the first lookup after a knot has been set   
 ## - creates an index mapping knot x values to their ordered indexes
-sub _index_keys
+sub _index_x_vals
    {
    my ( $self ) = @_;
 
-   delete $self->{'_index'};
-   for my $i ( 0 .. $#{ $self->{'_keys'} } )
+   delete $self->{_x_vals_index};
+   for my $i ( 0 .. $#{ $self->{_x_vals_order} } )
       {
-      $self->{'_index'}{ $self->{'_keys'}[$i] } = $i;
+      $self->{_x_vals_index}{ $self->{_x_vals_order}[$i] } = $i;
       }
    }
 
